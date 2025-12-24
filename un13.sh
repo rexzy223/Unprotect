@@ -1,91 +1,87 @@
 #!/bin/bash
 
-REMOTE_PATH="/var/www/pterodactyl/app/Http/Controllers/Admin/ApiController.php"
+REMOTE_PATH="/var/www/pterodactyl/app/Http/Controllers/Api/Client/ApiKeyController.php"
+BACKUP_PATH="/var/www/pterodactyl/app/Http/Controllers/Api/Client/ApiKeyController.php.bak.$(date +%s)"
 
-echo "🚀 Menghapus proteksi Anti Create Pltc..."
+echo "🚀 Menghapus proteksi Anti Create PLTC..."
 
-# Buat direktori jika belum ada
+if [ -f "$REMOTE_PATH" ]; then
+  mv "$REMOTE_PATH" "$BACKUP_PATH"
+  echo "📦 Backup file lama dibuat di $BACKUP_PATH"
+fi
+
 mkdir -p "$(dirname "$REMOTE_PATH")"
+chmod 755 "$(dirname "$REMOTE_PATH")"
 
-# Tulis ulang file PHP
-cat <<'PHP' > "$REMOTE_PATH"
+cat > "$REMOTE_PATH" <<'PHP'
 <?php
 
-namespace Pterodactyl\Http\Controllers\Admin;
+namespace Pterodactyl\Http\Controllers\Api\Client;
 
-use Illuminate\View\View;
-use Illuminate\Http\Request;
-use Illuminate\Http\Response;
 use Pterodactyl\Models\ApiKey;
-use Illuminate\Http\RedirectResponse;
-use Prologue\Alerts\AlertsMessageBag;
-use Pterodactyl\Services\Acl\Api\AdminAcl;
-use Illuminate\View\Factory as ViewFactory;
-use Pterodactyl\Http\Controllers\Controller;
-use Pterodactyl\Services\Api\KeyCreationService;
-use Pterodactyl\Contracts\Repository\ApiKeyRepositoryInterface;
-use Pterodactyl\Http\Requests\Admin\Api\StoreApplicationApiKeyRequest;
+use Illuminate\Http\JsonResponse;
+use Pterodactyl\Facades\Activity;
+use Pterodactyl\Exceptions\DisplayException;
+use Pterodactyl\Http\Requests\Api\Client\ClientApiRequest;
+use Pterodactyl\Transformers\Api\Client\ApiKeyTransformer;
+use Pterodactyl\Http\Requests\Api\Client\Account\StoreApiKeyRequest;
 
-class ApiController extends Controller
+class ApiKeyController extends ClientApiController
 {
-    public function __construct(
-        private AlertsMessageBag $alert,
-        private ApiKeyRepositoryInterface $repository,
-        private KeyCreationService $keyCreationService,
-        private ViewFactory $view,
-    ) {
+    public function index(ClientApiRequest $request): array
+    {
+        $user = $request->user();
+
+        return $this->fractal->collection($user->apiKeys)
+            ->transformWith($this->getTransformer(ApiKeyTransformer::class))
+            ->toArray();
     }
 
-    public function index(Request $request): View
+    public function store(StoreApiKeyRequest $request): array
     {
-        return $this->view->make('admin.api.index', [
-            'keys' => $this->repository->getApplicationKeys($request->user()),
-        ]);
-    }
+        $user = $request->user();
 
-    public function create(): View
-    {
-        $resources = AdminAcl::getResourceList();
-        sort($resources);
+        if ($user->apiKeys->count() >= 25) {
+            throw new DisplayException('❌ Batas maksimal API Key tercapai (maksimum 25).');
+        }
 
-        return $this->view->make('admin.api.new', [
-            'resources' => $resources,
-            'permissions' => [
-                'r' => AdminAcl::READ,
-                'rw' => AdminAcl::READ | AdminAcl::WRITE,
-                'n' => AdminAcl::NONE,
-            ],
-        ]);
-    }
-
-    public function store(StoreApplicationApiKeyRequest $request): RedirectResponse
-    {
-        $this->keyCreationService
-            ->setKeyType(ApiKey::TYPE_APPLICATION)
-            ->handle([
-                'memo' => $request->input('memo'),
-                'user_id' => $request->user()->id,
-            ], $request->getKeyPermissions());
-
-        $this->alert
-            ->success('A new application API key has been generated for your account.')
-            ->flash();
-
-        return redirect()->route('admin.api.index');
-    }
-
-    public function delete(Request $request, string $identifier): Response
-    {
-        $this->repository->deleteApplicationKey(
-            $request->user(),
-            $identifier
+        $token = $user->createToken(
+            $request->input('description'),
+            $request->input('allowed_ips')
         );
 
-        return response('', 204);
+        Activity::event('user:api-key.create')
+            ->subject($token->accessToken)
+            ->property('identifier', $token->accessToken->identifier)
+            ->log();
+
+        return $this->fractal->item($token->accessToken)
+            ->transformWith($this->getTransformer(ApiKeyTransformer::class))
+            ->addMeta(['secret_token' => $token->plainTextToken])
+            ->toArray();
+    }
+
+    public function delete(ClientApiRequest $request, string $identifier): JsonResponse
+    {
+        $user = $request->user();
+
+        $key = $user->apiKeys()
+            ->where('key_type', ApiKey::TYPE_ACCOUNT)
+            ->where('identifier', $identifier)
+            ->firstOrFail();
+
+        Activity::event('user:api-key.delete')
+            ->property('identifier', $key->identifier)
+            ->log();
+
+        $key->delete();
+
+        return new JsonResponse([], JsonResponse::HTTP_NO_CONTENT);
     }
 }
 PHP
 
-echo "✅ Proteksi Anti Create Pltc berhasil di hapus!"
+echo "✅ Proteksi Anti Create PLTC BERHASIL DIHAPUS"
 echo "📂 Lokasi file: $REMOTE_PATH"
-echo "🔒 Berhasil 100%."
+echo "🗂️ Backup file lama: $BACKUP_PATH"
+echo "🔓 Semua user sekarang bisa membuat PLTC / API Key."
